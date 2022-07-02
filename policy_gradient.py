@@ -50,10 +50,7 @@ class MLPCritic(nn.Module):
 class DiagonalGaussianDistribution:
 
     def __init__(self, mu, log_std):
-        self.mu = mu
-        self.log_std = log_std
-        self._dist = torch.distributions.Normal(self.mu,
-                                                torch.exp(self.log_std))
+        self._dist = torch.distributions.Normal(mu, torch.exp(log_std))
 
     def sample(self):
         """
@@ -69,9 +66,6 @@ class DiagonalGaussianDistribution:
         # so I need to do the summation myself.
         return self._dist.log_prob(value).sum(axis=-1)
 
-    def entropy(self):
-        return 0.5 + 0.5 * np.log(2 * np.pi) + self.log_std.sum(axis=-1)
-
 
 class MLPGaussianActor(nn.Module):
 
@@ -85,13 +79,14 @@ class MLPGaussianActor(nn.Module):
         independent of observations, initialized to [-0.5, -0.5, ..., -0.5].
         (Make sure it's trainable!)
         """
+        # although this is just an initialization, however, 0 is worse than -0.5
+        # The entire reward curve is shifted down.
         self.log_std = torch.nn.Parameter(torch.zeros((act_dim)) - 0.5)
         self.mu_net = mlp((obs_dim, ) + hidden_sizes + (act_dim, ), activation)
-        self.dummy_param = nn.Parameter(torch.empty(0))
 
     @property
     def device(self):
-        return self.dummy_param.device
+        return self.log_std.device
 
     def forward(self, obs, act=None):
         mu = self.mu_net(obs)
@@ -171,19 +166,22 @@ def policy_loss_ppo(obs: torch.Tensor,
     return -torch.minimum(first, second).mean()
 
 
-def policy_loss(obs: torch.Tensor,
-                actions: torch.Tensor,
-                logp_old: torch.Tensor,
-                advantage: torch.Tensor,
-                actor: MLPGaussianActor,
-                epsilon: float = 0.2):
+def policy_loss_vpg(obs: torch.Tensor, actions: torch.Tensor,
+                    advantage: torch.Tensor, actor: MLPGaussianActor):
     logp = actor.log_prob(obs, actions)
     return -(logp * advantage).mean()
 
 
-def ppo_one_epoch(env: gym.Env, actor: MLPGaussianActor, critic: MLPCritic,
-                  opt_actor, opt_critic, n_steps: int, n_train_actor_per_step,
-                  n_train_critic_per_step, logger: Logger):
+def one_epoch(env: gym.Env,
+              actor: MLPGaussianActor,
+              critic: MLPCritic,
+              opt_actor,
+              opt_critic,
+              n_steps: int,
+              n_train_actor_per_step,
+              n_train_critic_per_step,
+              logger: Logger,
+              method="ppo"):
     start = time.time()
     obs, actions, rewards, dones = sample_trajectory(env, actor, n_steps)
     logger.add_scale("time_env", time.time() - start)
@@ -197,22 +195,29 @@ def ppo_one_epoch(env: gym.Env, actor: MLPGaussianActor, critic: MLPCritic,
     reward_to_go_tensor = torch.as_tensor(reward_to_go,
                                           dtype=torch.float32,
                                           device=critic.device)
+    reward_to_go_normalized_tensor = (
+        reward_to_go_tensor -
+        reward_to_go_tensor.mean()) / reward_to_go_tensor.std()
     with torch.no_grad():
-        logp_old = actor.log_prob(obs_tensor, actions_tensor)
+        if method == "ppo":
+            logp_old = actor.log_prob(obs_tensor, actions_tensor)
         value_tensor = critic(obs_tensor)
     for i in range(n_train_actor_per_step):
         opt_actor.zero_grad()
-        actor_loss = policy_loss(
-            obs_tensor, actions_tensor, logp_old,
-            reward_to_go_tensor - (value_tensor * reward_to_go_tensor.std() +
-                                   reward_to_go_tensor.mean()), actor)
+        advantage = (reward_to_go_normalized_tensor -
+                     value_tensor) * reward_to_go_tensor.std()
+        if method == "ppo":
+            actor_loss = policy_loss_ppo(obs_tensor, actions_tensor, logp_old,
+                                         advantage, actor)
+        elif method == "vpg":
+            actor_loss = policy_loss_vpg(obs_tensor, actions_tensor, advantage,
+                                         actor)
+        else:
+            raise NotImplementedError(method)
         logger.add_scale("actor_loss", actor_loss, i)
         actor_loss.backward()
         opt_actor.step()
 
-    reward_to_go_normalized_tensor = (
-        reward_to_go_tensor -
-        reward_to_go_tensor.mean()) / reward_to_go_tensor.std()
     for i in range(n_train_critic_per_step):
         opt_critic.zero_grad()
         value_tensor = critic(obs_tensor)
@@ -227,9 +232,9 @@ def ppo_one_epoch(env: gym.Env, actor: MLPGaussianActor, critic: MLPCritic,
 
 def main():
     n_epoches = 100
-    n_steps_per_epoch = 50e3
-    n_train_actor_per_step = 1
-    n_train_critic_per_step = 1
+    n_steps_per_epoch = 4000
+    n_train_actor_per_step = 80
+    n_train_critic_per_step = 80
     env: gym.Env = gym.make('HalfCheetah-v4')
     print(env.action_space)
     print(env.observation_space)
@@ -239,14 +244,13 @@ def main():
                              hidden_sizes=(64, 64),
                              activation=torch.nn.Tanh)
     critic = MLPCritic(obs_dim, hidden_sizes=(64, 64), activation=nn.Tanh)
-    opt_actor = torch.optim.Adam(actor.parameters(), lr=1e-2)
-    opt_critic = torch.optim.Adam(critic.parameters(), lr=1e-2)
+    opt_actor = torch.optim.Adam(actor.parameters(), lr=3e-4)
+    opt_critic = torch.optim.Adam(critic.parameters(), lr=1e-3)
     logger = Logger(SummaryWriter(),
                     max(n_train_actor_per_step, n_train_critic_per_step))
     for i in range(n_epoches):
-        ppo_one_epoch(env, actor, critic, opt_actor, opt_critic,
-                      n_steps_per_epoch, n_train_actor_per_step,
-                      n_train_critic_per_step, logger)
+        one_epoch(env, actor, critic, opt_actor, opt_critic, n_steps_per_epoch,
+                  n_train_actor_per_step, n_train_critic_per_step, logger)
 
 
 if __name__ == '__main__':
