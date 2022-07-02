@@ -104,7 +104,7 @@ class MLPGaussianActor(nn.Module):
             pi = self(
                 torch.as_tensor(ob, dtype=torch.float32,
                                 device=self.device).view(1, -1))
-            return pi.sample().squeeze().cpu().numpy()
+            return pi.sample().squeeze(0).cpu().numpy()
 
 
 def sample_trajectory(env: gym.Env,
@@ -156,9 +156,10 @@ def average_total_reward(rewards, dones):
 def policy_loss_ppo(obs: torch.Tensor,
                     actions: torch.Tensor,
                     logp_old: torch.Tensor,
-                    advantage: torch.Tensor,
+                    advantage: np.ndarray,
                     actor: MLPGaussianActor,
                     epsilon: float = 0.2):
+    advantage = torch.as_tensor(advantage, device=actor.device)
     logp = actor.log_prob(obs, actions)
     ratio = torch.exp(logp - logp_old)
     first = ratio * advantage
@@ -167,9 +168,24 @@ def policy_loss_ppo(obs: torch.Tensor,
 
 
 def policy_loss_vpg(obs: torch.Tensor, actions: torch.Tensor,
-                    advantage: torch.Tensor, actor: MLPGaussianActor):
+                    advantage: np.ndarray, actor: MLPGaussianActor):
+    advantage = torch.as_tensor(advantage, device=actor.device)
     logp = actor.log_prob(obs, actions)
     return -(logp * advantage).mean()
+
+
+def gae(rewards: np.ndarray, value: np.ndarray, dones: np.ndarray, gamma,
+        gae_lambda):
+    advantage = np.zeros_like(rewards)
+    for i in reversed(range(rewards.shape[0])):
+        if dones[i]:
+            advantage[i] = rewards[i] - value[i]
+        elif i == advantage.shape[0] - 1:
+            raise NotImplementedError("last step in trajectory but not done.")
+        else:
+            delta = rewards[i] + gamma * value[i + 1] - value[i]
+            advantage[i] = delta + gamma * gae_lambda * advantage[i + 1]
+    return advantage
 
 
 def one_epoch(env: gym.Env,
@@ -182,30 +198,34 @@ def one_epoch(env: gym.Env,
               n_train_critic_per_step,
               logger: Logger,
               method="ppo"):
+    gae_lambda = 0.97
+    gamma = 0.99
     start = time.time()
     obs, actions, rewards, dones = sample_trajectory(env, actor, n_steps)
     logger.add_scale("time_env", time.time() - start)
     start = time.time()
     logger.add_scale("reward", average_total_reward(rewards, dones))
-    reward_to_go = compute_reward_to_go(rewards, dones)
+    reward_to_go = compute_reward_to_go(rewards, dones, gamma)
     obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=actor.device)
     actions_tensor = torch.as_tensor(actions,
                                      dtype=torch.float32,
                                      device=actor.device)
-    reward_to_go_tensor = torch.as_tensor(reward_to_go,
-                                          dtype=torch.float32,
-                                          device=critic.device)
-    reward_to_go_normalized_tensor = (
-        reward_to_go_tensor -
-        reward_to_go_tensor.mean()) / reward_to_go_tensor.std()
     with torch.no_grad():
         if method == "ppo":
             logp_old = actor.log_prob(obs_tensor, actions_tensor)
         value_tensor = critic(obs_tensor)
+        value = (value_tensor * reward_to_go.std() +
+                 reward_to_go.mean()).cpu().numpy()
     for i in range(n_train_actor_per_step):
         opt_actor.zero_grad()
-        advantage = (reward_to_go_normalized_tensor -
-                     value_tensor) * reward_to_go_tensor.std()
+        if gae_lambda >= 1:
+            # critic is trained with normalized rtg, so advantage is computed
+            # in normalized scalar and then scaled back.
+            advantage = reward_to_go - value
+        else:
+            advantage = gae(rewards, value, dones, gamma, gae_lambda)
+        # Note: advantage can be further normalized.
+        advantage = (advantage - advantage.mean()) / advantage.std()
         if method == "ppo":
             actor_loss = policy_loss_ppo(obs_tensor, actions_tensor, logp_old,
                                          advantage, actor)
@@ -218,6 +238,10 @@ def one_epoch(env: gym.Env,
         actor_loss.backward()
         opt_actor.step()
 
+    reward_to_go_normalized_tensor = torch.as_tensor(
+        (reward_to_go - reward_to_go.mean()) / reward_to_go.std(),
+        dtype=torch.float32,
+        device=critic.device)
     for i in range(n_train_critic_per_step):
         opt_critic.zero_grad()
         value_tensor = critic(obs_tensor)
@@ -231,9 +255,32 @@ def one_epoch(env: gym.Env,
 
 
 def main():
-    n_epoches = 100
+    n_epoches = 20
     n_steps_per_epoch = 4000
     n_train_actor_per_step = 80
+    n_train_critic_per_step = 80
+    env: gym.Env = gym.make('InvertedPendulum-v2')
+    print(env.action_space)
+    print(env.observation_space)
+    obs_dim = env.observation_space.shape[0]
+    actor = MLPGaussianActor(obs_dim,
+                             env.action_space.shape[0],
+                             hidden_sizes=(64, ),
+                             activation=torch.nn.Tanh)
+    critic = MLPCritic(obs_dim, hidden_sizes=(64, ), activation=nn.Tanh)
+    opt_actor = torch.optim.Adam(actor.parameters(), lr=3e-3)
+    opt_critic = torch.optim.Adam(critic.parameters(), lr=1e-2)
+    logger = Logger(SummaryWriter(),
+                    max(n_train_actor_per_step, n_train_critic_per_step))
+    for i in range(n_epoches):
+        one_epoch(env, actor, critic, opt_actor, opt_critic, n_steps_per_epoch,
+                  n_train_actor_per_step, n_train_critic_per_step, logger)
+
+
+def main_vpg():
+    n_epoches = 50
+    n_steps_per_epoch = 40000
+    n_train_actor_per_step = 1
     n_train_critic_per_step = 80
     env: gym.Env = gym.make('HalfCheetah-v4')
     print(env.action_space)
@@ -250,7 +297,8 @@ def main():
                     max(n_train_actor_per_step, n_train_critic_per_step))
     for i in range(n_epoches):
         one_epoch(env, actor, critic, opt_actor, opt_critic, n_steps_per_epoch,
-                  n_train_actor_per_step, n_train_critic_per_step, logger)
+                  n_train_actor_per_step, n_train_critic_per_step, logger,
+                  "vpg")
 
 
 if __name__ == '__main__':
