@@ -214,8 +214,10 @@ def one_epoch(env: gym.Env,
         if method == "ppo":
             logp_old = actor.log_prob(obs_tensor, actions_tensor)
         value_tensor = critic(obs_tensor)
-        value = (value_tensor * reward_to_go.std() +
-                 reward_to_go.mean()).cpu().numpy()
+        # Note: ask critic to predict the normalized rtg is not necessary
+        # value = (value_tensor * reward_to_go.std() +
+        #          reward_to_go.mean()).cpu().numpy()
+        value = value_tensor.cpu().numpy()
     for i in range(n_train_actor_per_step):
         opt_actor.zero_grad()
         if gae_lambda >= 1:
@@ -238,10 +240,12 @@ def one_epoch(env: gym.Env,
         actor_loss.backward()
         opt_actor.step()
 
-    reward_to_go_normalized_tensor = torch.as_tensor(
-        (reward_to_go - reward_to_go.mean()) / reward_to_go.std(),
-        dtype=torch.float32,
-        device=critic.device)
+    # reward_to_go_normalized_tensor = torch.as_tensor(
+    #     (reward_to_go - reward_to_go.mean()) / reward_to_go.std(),
+    #     dtype=torch.float32,
+    #     device=critic.device)
+    reward_to_go_normalized_tensor = torch.as_tensor(reward_to_go,
+                                                     device=critic.device)
     for i in range(n_train_critic_per_step):
         opt_critic.zero_grad()
         value_tensor = critic(obs_tensor)
@@ -259,7 +263,35 @@ def main():
     n_steps_per_epoch = 4000
     n_train_actor_per_step = 80
     n_train_critic_per_step = 80
-    env: gym.Env = gym.make('InvertedPendulum-v2')
+    env: gym.Env = gym.make('HalfCheetah-v4')
+    # env: gym.Env = gym.make('InvertedPendulum-v4')
+    print(env.action_space)
+    print(env.observation_space)
+    obs_dim = env.observation_space.shape[0]
+    actor = MLPGaussianActor(obs_dim,
+                             env.action_space.shape[0],
+                             hidden_sizes=(64, ),
+                             activation=torch.nn.Tanh)
+    critic = MLPCritic(obs_dim, hidden_sizes=(64, ), activation=nn.Tanh)
+    # Note: a larger lr is very important to get good performance in a short time.
+    opt_actor = torch.optim.Adam(actor.parameters(), lr=3e-3)
+    opt_critic = torch.optim.Adam(critic.parameters(), lr=1e-2)
+    logger = Logger(SummaryWriter(),
+                    max(n_train_actor_per_step, n_train_critic_per_step))
+    for i in range(n_epoches):
+        one_epoch(env, actor, critic, opt_actor, opt_critic, n_steps_per_epoch,
+                  n_train_actor_per_step, n_train_critic_per_step, logger)
+
+
+def main_vpg():
+    # vpg is roughly 2x less efficient than ppo.
+    n_epoches = 50
+    n_steps_per_epoch = 4000
+    # once this number gets big. The training is very instable. Usually, it is set to be 1.
+    n_train_actor_per_step = 5
+    n_train_critic_per_step = 80
+    # env: gym.Env = gym.make('HalfCheetah-v4')
+    env: gym.Env = gym.make('InvertedPendulum-v4')
     print(env.action_space)
     print(env.observation_space)
     obs_dim = env.observation_space.shape[0]
@@ -274,32 +306,9 @@ def main():
                     max(n_train_actor_per_step, n_train_critic_per_step))
     for i in range(n_epoches):
         one_epoch(env, actor, critic, opt_actor, opt_critic, n_steps_per_epoch,
-                  n_train_actor_per_step, n_train_critic_per_step, logger)
-
-
-def main_vpg():
-    n_epoches = 50
-    n_steps_per_epoch = 40000
-    n_train_actor_per_step = 1
-    n_train_critic_per_step = 80
-    env: gym.Env = gym.make('HalfCheetah-v4')
-    print(env.action_space)
-    print(env.observation_space)
-    obs_dim = env.observation_space.shape[0]
-    actor = MLPGaussianActor(obs_dim,
-                             env.action_space.shape[0],
-                             hidden_sizes=(64, 64),
-                             activation=torch.nn.Tanh)
-    critic = MLPCritic(obs_dim, hidden_sizes=(64, 64), activation=nn.Tanh)
-    opt_actor = torch.optim.Adam(actor.parameters(), lr=3e-4)
-    opt_critic = torch.optim.Adam(critic.parameters(), lr=1e-3)
-    logger = Logger(SummaryWriter(),
-                    max(n_train_actor_per_step, n_train_critic_per_step))
-    for i in range(n_epoches):
-        one_epoch(env, actor, critic, opt_actor, opt_critic, n_steps_per_epoch,
                   n_train_actor_per_step, n_train_critic_per_step, logger,
                   "vpg")
 
 
 if __name__ == '__main__':
-    main()
+    main_vpg()
