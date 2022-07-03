@@ -259,7 +259,7 @@ def one_epoch(env: gym.Env,
 
 
 def main():
-    n_epoches = 20
+    n_epoches = 200
     n_steps_per_epoch = 4000
     n_train_actor_per_step = 80
     n_train_critic_per_step = 80
@@ -274,8 +274,8 @@ def main():
                              activation=torch.nn.Tanh)
     critic = MLPCritic(obs_dim, hidden_sizes=(64, ), activation=nn.Tanh)
     # Note: a larger lr is very important to get good performance in a short time.
-    opt_actor = torch.optim.Adam(actor.parameters(), lr=3e-3)
-    opt_critic = torch.optim.Adam(critic.parameters(), lr=1e-2)
+    opt_actor = torch.optim.Adam(actor.parameters(), lr=3e-4)
+    opt_critic = torch.optim.Adam(critic.parameters(), lr=1e-3)
     logger = Logger(SummaryWriter(),
                     max(n_train_actor_per_step, n_train_critic_per_step))
     for i in range(n_epoches):
@@ -285,13 +285,13 @@ def main():
 
 def main_vpg():
     # vpg is roughly 2x less efficient than ppo.
-    n_epoches = 50
+    n_epoches = 500
     n_steps_per_epoch = 4000
     # once this number gets big. The training is very instable. Usually, it is set to be 1.
     n_train_actor_per_step = 5
     n_train_critic_per_step = 80
-    # env: gym.Env = gym.make('HalfCheetah-v4')
-    env: gym.Env = gym.make('InvertedPendulum-v4')
+    env: gym.Env = gym.make('HalfCheetah-v4')
+    # env: gym.Env = gym.make('InvertedPendulum-v4')
     print(env.action_space)
     print(env.observation_space)
     obs_dim = env.observation_space.shape[0]
@@ -300,8 +300,8 @@ def main_vpg():
                              hidden_sizes=(64, ),
                              activation=torch.nn.Tanh)
     critic = MLPCritic(obs_dim, hidden_sizes=(64, ), activation=nn.Tanh)
-    opt_actor = torch.optim.Adam(actor.parameters(), lr=3e-3)
-    opt_critic = torch.optim.Adam(critic.parameters(), lr=1e-2)
+    opt_actor = torch.optim.Adam(actor.parameters(), lr=3e-4)
+    opt_critic = torch.optim.Adam(critic.parameters(), lr=1e-3)
     logger = Logger(SummaryWriter(),
                     max(n_train_actor_per_step, n_train_critic_per_step))
     for i in range(n_epoches):
@@ -311,4 +311,5 @@ def main_vpg():
 
 
 if __name__ == '__main__':
+    # main()
     main_vpg()
