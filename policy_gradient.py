@@ -70,7 +70,6 @@ class DiagonalGaussianDistribution:
 class MLPGaussianActor(nn.Module):
 
     def __init__(self, obs_dim, act_dim, hidden_sizes, activation):
-        super().__init__()
         """
         Initialize an MLP Gaussian Actor by making a PyTorch module for computing the
         mean of the distribution given a batch of observations, and a log_std parameter.
@@ -79,6 +78,7 @@ class MLPGaussianActor(nn.Module):
         independent of observations, initialized to [-0.5, -0.5, ..., -0.5].
         (Make sure it's trainable!)
         """
+        super().__init__()
         # although this is just an initialization, however, 0 is worse than -0.5
         # The entire reward curve is shifted down.
         self.log_std = torch.nn.Parameter(torch.zeros((act_dim)) - 0.5)
